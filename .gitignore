@@ -1,0 +1,19 @@
+# Секреты
+.env
+.env.*
+!.env.example
+
+# виртуальное окружение Python
+venv/
+.venv/
+
+# Кэш Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Логи
+*.log
+
+# мусор редактора VS Code
+.vscode/
