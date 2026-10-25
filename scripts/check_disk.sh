@@ -1,24 +1,26 @@
 #!/usr/bin/env bash
 #
-# check_disk.sh — проверка занятости диска для систем мониторинга.
+# check_disk.sh — disk usage check for monitoring systems.
 #
-# Использование:
-#   ./check_disk.sh [путь] [warn%] [crit%]
+# Usage:
+#   ./check_disk.sh [PATH] [WARN] [CRIT]
 #   ./check_disk.sh -h | --help
 #
-# Аргументы:
-#   путь   — точка монтирования или каталог (по умолчанию: /)
-#   warn%  — порог предупреждения, целое 0..100 (по умолчанию: 80)
-#   crit%  — критический порог, целое 0..100 (по умолчанию: 90)
+# Arguments:
+#   PATH   mount point or directory to check (default: /)
+#   WARN   warning threshold in percent, integer 0..100 (default: 80)
+#   CRIT   critical threshold in percent, integer 0..100 (default: 90)
 #
-# Коды выхода (соглашение Nagios/monitoring-plugins):
+# Exit codes (Nagios / monitoring-plugins convention):
 #   0 — OK
 #   1 — WARNING
 #   2 — CRITICAL
-#   3 — UNKNOWN (ошибка аргументов / выполнения)
+#   3 — UNKNOWN (bad arguments / runtime failure)
 #
-# Пример:
+# Examples:
+#   ./check_disk.sh
 #   ./check_disk.sh /var 75 90
+#   ./check_disk.sh / 0 100
 
 set -euo pipefail
 
@@ -46,23 +48,23 @@ die_usage() {
     exit "$UNKNOWN"
 }
 
-# Returns true only for a plain decimal integer without leading zeros.
-# "0" is allowed; "00", "08", "010", "+5", "-5", " 5" are not.
+# True only for a plain decimal integer with no leading zeros and no sign.
+# "0" is allowed. "00", "08", "010", "+5", "-5", " 5", "" are not.
 is_integer() {
     [[ "$1" =~ ^0$ || "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
-# Returns true if the value is a valid integer within 0..100.
-# Uses 10# to force decimal base in arithmetic (defence in depth —
-# is_integer already rejects leading zeros).
+# True only for a valid percentage threshold: decimal integer in 0..100.
+# Length is bounded (<= 3 chars) BEFORE arithmetic so that values such as
+# 2^64 (18446744073709551616) cannot wrap around to 0 inside $((...)).
 in_range_percent() {
     is_integer "$1" || return 1
-    local n
-    n=$((10#$1))
+    (( ${#1} <= 3 )) || return 1
+    local n=$((10#$1))
     (( n >= 0 && n <= 100 ))
 }
 
-# Prints the used-space percentage (integer only) for the given path.
+# Prints the used-space percentage (digits only) for the given path.
 # On failure prints nothing to stdout and returns non-zero.
 # Note: set -e does NOT protect inside a function called from an `if`
 # condition; the empty-output check below is what actually guards us.
