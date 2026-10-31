@@ -1,34 +1,36 @@
 #!/usr/bin/env bash
 #
-# check_disk.sh — disk usage check for monitoring systems.
+# check_disk.sh — проверка занятости диска для систем мониторинга.
 #
-# Usage:
+# Использование:
 #   ./check_disk.sh [PATH] [WARN] [CRIT]
 #   ./check_disk.sh -h | --help
 #
-# Arguments:
-#   PATH   mount point or directory to check (default: /)
-#   WARN   warning threshold in percent, integer 0..100 (default: 80)
-#   CRIT   critical threshold in percent, integer 0..100 (default: 90)
+# Коды выхода (соглашение Nagios / monitoring-plugins):
+#   0 — OK, 1 — WARNING, 2 — CRITICAL, 3 — UNKNOWN
 #
-# Exit codes (Nagios / monitoring-plugins convention):
-#   0 — OK
-#   1 — WARNING
-#   2 — CRITICAL
-#   3 — UNKNOWN (bad arguments / runtime failure)
-#
-# Examples:
+# Примеры:
 #   ./check_disk.sh
 #   ./check_disk.sh /var 75 90
-#   ./check_disk.sh / 0 100
 
+# Строгий режим:
+#   -e  остановить скрипт, если команда завершилась с ошибкой;
+#   -u  считать ошибкой обращение к необъявленной переменной
+#       (защита от опечаток вроде $pth вместо $path);
+#   -o pipefail  конвейер "a | b | c" считается неудачным, если упала
+#       ЛЮБАЯ его часть, а не только последняя.
 set -euo pipefail
 
+# Коды выхода вынесены в именованные константы: в коде видно смысл
+# ("exit $CRITICAL"), а не магическое число. readonly запрещает
+# случайно изменить значение дальше по скрипту.
 readonly OK=0
 readonly WARNING=1
 readonly CRITICAL=2
 readonly UNKNOWN=3
 
+# Справка. Кавычки вокруг 'EOF' отключают подстановку переменных
+# внутри текста: он выводится ровно так, как написан.
 usage() {
     cat <<'EOF'
 Usage: check_disk.sh [PATH] [WARN] [CRIT]
@@ -42,36 +44,44 @@ Exit codes: 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN
 EOF
 }
 
+# Ошибка использования: сообщение и справка идут в stderr (>&2), чтобы
+# не смешиваться с нормальным выводом, который читает система мониторинга.
+# Код 3 (UNKNOWN) значит "проверку выполнить не удалось", а не "диск плохой".
 die_usage() {
     echo "UNKNOWN - $1" >&2
     usage >&2
     exit "$UNKNOWN"
 }
 
-# True only for a plain decimal integer with no leading zeros and no sign.
-# "0" is allowed. "00", "08", "010", "+5", "-5", " 5", "" are not.
-is_integer() {
-    [[ "$1" =~ ^0$ || "$1" =~ ^[1-9][0-9]*$ ]]
+# Истина, только если аргумент — целое число от 0 до 100 без знака
+# и без ведущих нулей. Разбор регулярки:
+#   0            ровно ноль
+#   [1-9][0-9]?  от 1 до 99 (первая цифра не ноль, вторая необязательна)
+#   100          ровно сто
+# Якоря ^ и $ обязательны: без них "abc5" или "1000" тоже совпали бы.
+# Выражение лежит в переменной и используется БЕЗ кавычек: в кавычках
+# Bash трактует его как обычный текст, и сопоставление не сработает.
+# Побочный выигрыш: значения вроде "08" или огромных чисел до арифметики
+# не доходят, поэтому проблемы восьмеричной системы и переполнения
+# исключены по построению.
+is_percent() {
+    local -r re='^(0|[1-9][0-9]?|100)$'
+    [[ "$1" =~ $re ]]
 }
 
-# True only for a valid percentage threshold: decimal integer in 0..100.
-# Length is bounded (<= 3 chars) BEFORE arithmetic so that values such as
-# 2^64 (18446744073709551616) cannot wrap around to 0 inside $((...)).
-in_range_percent() {
-    is_integer "$1" || return 1
-    (( ${#1} <= 3 )) || return 1
-    local n=$((10#$1))
-    (( n >= 0 && n <= 100 ))
-}
-
-# Prints the used-space percentage (digits only) for the given path.
-# On failure prints nothing to stdout and returns non-zero.
-# Note: set -e does NOT protect inside a function called from an `if`
-# condition; the empty-output check below is what actually guards us.
+# Печатает процент занятости (только цифры) для указанного пути.
+# Конвейер:
+#   df --output=pcent -- "$path"  заголовок "Use%" и строка вида " 42%";
+#                                 "--" значит "дальше только аргументы":
+#                                 путь вида "-x" не примется за опцию;
+#   tail -n 1                     оставляет последнюю строку (без заголовка);
+#   tr -dc '0-9'                  удаляет всё, кроме цифр (пробелы, "%", "\n").
+# set -e НЕ действует внутри функции, вызванной в условии if, поэтому
+# от пустого результата нас защищает явная проверка -z.
 get_usage_percent() {
     local path="$1"
     local raw
-    raw="$(df --output=pcent "$path" | tail -n 1 | tr -dc '0-9')"
+    raw="$(df --output=pcent -- "$path" | tail -n 1 | tr -dc '0-9')"
     if [[ -z "$raw" ]]; then
         return 1
     fi
@@ -79,28 +89,30 @@ get_usage_percent() {
 }
 
 main() {
-    # Help short-circuits before any argument validation.
+    # Справка обрабатывается раньше всего остального и завершается кодом 0.
     if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
         usage
         exit "$OK"
     fi
 
+    # $# — число аргументов. Лишние аргументы отвергаем явно:
+    # молча проигнорированный ввод в мониторинге хуже понятной ошибки.
+    if (( $# > 3 )); then
+        die_usage "too many arguments (got $#, expected at most 3)"
+    fi
+
+    # ${N:-значение} подставляет умолчание, если аргумент не передан.
     local path="${1:-/}"
     local warn="${2:-80}"
     local crit="${3:-90}"
 
-    if ! is_integer "$warn"; then
-        die_usage "WARN must be a decimal integer without leading zeros, got: '$warn'"
+    if ! is_percent "$warn"; then
+        die_usage "WARN must be an integer within 0..100 without leading zeros, got: '$warn'"
     fi
-    if ! is_integer "$crit"; then
-        die_usage "CRIT must be a decimal integer without leading zeros, got: '$crit'"
+    if ! is_percent "$crit"; then
+        die_usage "CRIT must be an integer within 0..100 without leading zeros, got: '$crit'"
     fi
-    if ! in_range_percent "$warn"; then
-        die_usage "WARN must be within 0..100, got: $warn"
-    fi
-    if ! in_range_percent "$crit"; then
-        die_usage "CRIT must be within 0..100, got: $crit"
-    fi
+    # Сравнение безопасно: после проверки выше это короткие десятичные числа.
     if (( warn > crit )); then
         die_usage "WARN ($warn) must not exceed CRIT ($crit)"
     fi
@@ -108,12 +120,16 @@ main() {
         die_usage "path does not exist: '$path'"
     fi
 
+    # Значение и код возврата получаем в одной конструкции: если функция
+    # вернула ошибку, срабатывает ветка UNKNOWN.
     local used_pct
     if ! used_pct="$(get_usage_percent "$path")"; then
         echo "UNKNOWN - failed to read disk usage for $path" >&2
         exit "$UNKNOWN"
     fi
 
+    # Порядок проверок важен: сначала более тяжёлое состояние (CRITICAL),
+    # иначе значение выше crit попало бы в ветку WARNING.
     if (( used_pct >= crit )); then
         echo "CRITICAL - $path usage ${used_pct}%"
         exit "$CRITICAL"
@@ -126,4 +142,7 @@ main() {
     exit "$OK"
 }
 
+# "$@" передаёт функции все аргументы скрипта с сохранением границ.
+# Вызов main в самом конце означает, что Bash прочитает файл целиком
+# до начала выполнения (безопаснее, если файл меняют на ходу).
 main "$@"
